@@ -7,7 +7,13 @@ from datetime import datetime, timedelta
 import io
 from typing import Dict, List, Tuple, Optional
 import warnings
+import logging
+import urllib3
+
+# Suppress warnings and logs
 warnings.filterwarnings('ignore')
+logging.getLogger('yfinance').setLevel(logging.CRITICAL)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Install required packages if not available
 try:
@@ -128,14 +134,18 @@ class PortfolioAnalyzer:
                     # Create ticker object
                     ticker = yf.Ticker(symbol)
                     
-                    # Get splits data
+                    # Get splits data with timeout
                     splits = ticker.splits
                     
                     if not splits.empty:
                         splits_data[symbol] = splits.to_dict()
                         
                 except Exception as e:
-                    st.warning(f"Could not fetch splits for {symbol}: {str(e)}")
+                    # Skip delisted or unavailable symbols silently
+                    if "404" in str(e) or "delisted" in str(e).lower():
+                        continue
+                    else:
+                        st.warning(f"Could not fetch splits for {symbol}: {str(e)}")
                     continue
             
             self.stock_splits = splits_data
@@ -264,9 +274,30 @@ class PortfolioAnalyzer:
                                 hist_data.loc[mask, 'Close'] /= split_ratio
                         
                         historical_prices[symbol] = hist_data['Close'].to_dict()
+                    else:
+                        # For symbols without data, use last known price from trades
+                        last_trade = self.all_trades[self.all_trades['Symbol'] == symbol].iloc[-1]
+                        fallback_price = last_trade['T. Price']
+                        historical_prices[symbol] = {datetime.now(): fallback_price}
                     
                 except Exception as e:
-                    st.warning(f"Could not fetch historical prices for {symbol}: {str(e)}")
+                    # Skip delisted symbols silently, use fallback for others
+                    if "404" in str(e) or "delisted" in str(e).lower():
+                        # Use last known trade price as fallback
+                        try:
+                            last_trade = self.all_trades[self.all_trades['Symbol'] == symbol].iloc[-1]
+                            fallback_price = last_trade['T. Price']
+                            historical_prices[symbol] = {datetime.now(): fallback_price}
+                        except:
+                            pass
+                    else:
+                        st.warning(f"Could not fetch historical prices for {symbol}: using last trade price")
+                        try:
+                            last_trade = self.all_trades[self.all_trades['Symbol'] == symbol].iloc[-1]
+                            fallback_price = last_trade['T. Price']
+                            historical_prices[symbol] = {datetime.now(): fallback_price}
+                        except:
+                            pass
                     continue
             
             return historical_prices
@@ -352,13 +383,31 @@ class PortfolioAnalyzer:
                     # Use last known price or current market price
                     try:
                         ticker = yf.Ticker(symbol)
-                        current_price = ticker.info.get('currentPrice', 0)
+                        ticker_info = ticker.info
+                        current_price = ticker_info.get('currentPrice', 0) or ticker_info.get('regularMarketPrice', 0)
+                        
                         if current_price > 0:
                             current_value = current_holding.iloc[0]['Quantity'] * current_price
                             dates.append(datetime.now())
                             cash_flows.append(current_value)
-                    except:
-                        pass
+                        else:
+                            # Use last trade price as fallback
+                            last_trade = symbol_trades.iloc[-1]
+                            current_value = current_holding.iloc[0]['Quantity'] * last_trade['T. Price']
+                            dates.append(datetime.now())
+                            cash_flows.append(current_value)
+                    except Exception as e:
+                        # For delisted stocks, use last trade price
+                        if "404" in str(e) or "delisted" in str(e).lower():
+                            try:
+                                last_trade = symbol_trades.iloc[-1]
+                                current_value = current_holding.iloc[0]['Quantity'] * last_trade['T. Price']
+                                dates.append(datetime.now())
+                                cash_flows.append(current_value)
+                            except:
+                                pass
+                        else:
+                            pass
                 
                 # Calculate XIRR
                 if len(dates) >= 2 and len(cash_flows) >= 2:
@@ -500,84 +549,90 @@ def main():
         with tab4:
             st.header("📈 Portfolio Value Analysis")
             
-            with st.spinner("Fetching historical prices and calculating portfolio value..."):
-                # Step 7: Fetch historical prices
-                historical_prices = analyzer.fetch_historical_prices()
+            # Step 7: Fetch historical prices
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            status_text.text("Fetching historical prices...")
+            historical_prices = analyzer.fetch_historical_prices()
+            progress_bar.progress(50)
                 
-                if historical_prices:
-                    st.success(f"✅ Step 7: Historical prices fetched ({len(historical_prices)} stocks)")
+            if historical_prices:
+                status_text.text("Calculating portfolio values...")
+                portfolio_df = analyzer.calculate_portfolio_value(historical_prices)
+                progress_bar.progress(100)
+                
+                # Store in session state for later use
+                st.session_state.portfolio_df = portfolio_df
+                st.session_state.historical_prices = historical_prices
+                
+                # Clear progress indicators
+                progress_bar.empty()
+                status_text.empty()
+                
+                st.success(f"✅ Historical prices fetched for {len(historical_prices)} stocks and portfolio values calculated")
+                
+                if not portfolio_df.empty:
+                    # Portfolio value chart
+                    fig = go.Figure()
                     
-                    # Step 8: Calculate daily portfolio value
-                    portfolio_df = analyzer.calculate_portfolio_value(historical_prices)
+                    fig.add_trace(go.Scatter(
+                        x=portfolio_df['Date'],
+                        y=portfolio_df['Portfolio_Value_USD'],
+                        mode='lines',
+                        name='USD',
+                        line=dict(color='blue')
+                    ))
                     
-                    # Store in session state for later use
-                    st.session_state.portfolio_df = portfolio_df
-                    st.session_state.historical_prices = historical_prices
+                    fig.add_trace(go.Scatter(
+                        x=portfolio_df['Date'],
+                        y=portfolio_df['Portfolio_Value_INR'],
+                        mode='lines',
+                        name='INR',
+                        line=dict(color='green'),
+                        yaxis='y2'
+                    ))
                     
-                    if not portfolio_df.empty:
-                        st.success("✅ Step 8: Daily portfolio value calculated")
+                    fig.add_trace(go.Scatter(
+                        x=portfolio_df['Date'],
+                        y=portfolio_df['Portfolio_Value_SGD'],
+                        mode='lines',
+                        name='SGD',
+                        line=dict(color='red'),
+                        yaxis='y3'
+                    ))
+                    
+                    fig.update_layout(
+                        title="Portfolio Value Over Time (Multi-Currency)",
+                        xaxis_title="Date",
+                        yaxis=dict(title="Value (USD)", side="left"),
+                        yaxis2=dict(title="Value (INR)", side="right", overlaying="y"),
+                        yaxis3=dict(title="Value (SGD)", side="right", overlaying="y", position=0.95),
+                        height=500
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Current portfolio value
+                    if len(portfolio_df) > 0:
+                        latest_values = portfolio_df.iloc[-1]
+                        col1, col2, col3 = st.columns(3)
                         
-                        # Portfolio value chart
-                        
-                        fig = go.Figure()
-                        
-                        fig.add_trace(go.Scatter(
-                            x=portfolio_df['Date'],
-                            y=portfolio_df['Portfolio_Value_USD'],
-                            mode='lines',
-                            name='USD',
-                            line=dict(color='blue')
-                        ))
-                        
-                        fig.add_trace(go.Scatter(
-                            x=portfolio_df['Date'],
-                            y=portfolio_df['Portfolio_Value_INR'],
-                            mode='lines',
-                            name='INR',
-                            line=dict(color='green'),
-                            yaxis='y2'
-                        ))
-                        
-                        fig.add_trace(go.Scatter(
-                            x=portfolio_df['Date'],
-                            y=portfolio_df['Portfolio_Value_SGD'],
-                            mode='lines',
-                            name='SGD',
-                            line=dict(color='red'),
-                            yaxis='y3'
-                        ))
-                        
-                        fig.update_layout(
-                            title="Portfolio Value Over Time (Multi-Currency)",
-                            xaxis_title="Date",
-                            yaxis=dict(title="Value (USD)", side="left"),
-                            yaxis2=dict(title="Value (INR)", side="right", overlaying="y"),
-                            yaxis3=dict(title="Value (SGD)", side="right", overlaying="y", position=0.95),
-                            height=500
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Current portfolio value
-                        if len(portfolio_df) > 0:
-                            latest_values = portfolio_df.iloc[-1]
-                            col1, col2, col3 = st.columns(3)
-                            
-                            with col1:
-                                st.metric(
-                                    "Portfolio Value (USD)", 
-                                    f"${latest_values['Portfolio_Value_USD']:,.2f}"
-                                )
-                            with col2:
-                                st.metric(
-                                    "Portfolio Value (INR)", 
-                                    f"₹{latest_values['Portfolio_Value_INR']:,.2f}"
-                                )
-                            with col3:
-                                st.metric(
-                                    "Portfolio Value (SGD)", 
-                                    f"S${latest_values['Portfolio_Value_SGD']:,.2f}"
-                                )
+                        with col1:
+                            st.metric(
+                                "Portfolio Value (USD)", 
+                                f"${latest_values['Portfolio_Value_USD']:,.2f}"
+                            )
+                        with col2:
+                            st.metric(
+                                "Portfolio Value (INR)", 
+                                f"₹{latest_values['Portfolio_Value_INR']:,.2f}"
+                            )
+                        with col3:
+                            st.metric(
+                                "Portfolio Value (SGD)", 
+                                f"S${latest_values['Portfolio_Value_SGD']:,.2f}"
+                            )
         
         with tab5:
             st.header("💰 XIRR Analysis")
