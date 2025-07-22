@@ -12,8 +12,10 @@ warnings.filterwarnings('ignore')
 # Install required packages if not available
 try:
     import pyxirr
-except ImportError:
-    st.error("Please install pyxirr: pip install pyxirr")
+    import plotly.express as px
+    import plotly.graph_objects as go
+except ImportError as e:
+    st.error(f"Please install required packages: {str(e)}")
     st.stop()
 
 # Configure Streamlit page
@@ -56,7 +58,9 @@ class PortfolioAnalyzer:
                         return False
                 
                 # Clean quantity column (remove commas)
-                trade_data['Quantity'] = trade_data['Quantity'].astype(str).str.replace(',', '').astype(float)
+                trade_data['Quantity'] = trade_data['Quantity'].apply(
+                    lambda x: pd.to_numeric(str(x).replace(',', ''), errors='coerce')
+                )
                 
                 all_data.append(trade_data[required_cols])
             
@@ -360,7 +364,10 @@ class PortfolioAnalyzer:
                 if len(dates) >= 2 and len(cash_flows) >= 2:
                     try:
                         xirr_value = pyxirr.xirr(dates, cash_flows)
-                        xirr_results[symbol] = xirr_value * 100  # Convert to percentage
+                        if xirr_value is not None:
+                            xirr_results[symbol] = xirr_value * 100  # Convert to percentage
+                        else:
+                            xirr_results[symbol] = None
                     except:
                         xirr_results[symbol] = None
             
@@ -450,7 +457,7 @@ def main():
                 with col1:
                     st.metric("Total Transactions", len(analyzer.all_trades))
                 with col2:
-                    st.metric("Unique Stocks", analyzer.all_trades['Symbol'].nunique())
+                    st.metric("Unique Stocks", str(analyzer.all_trades['Symbol'].nunique()))
                 with col3:
                     st.metric("Date Range", f"{analyzer.all_trades['Date'].min().strftime('%Y-%m-%d')} to {analyzer.all_trades['Date'].max().strftime('%Y-%m-%d')}")
         
@@ -463,7 +470,6 @@ def main():
                 
                 # Holdings visualization
                 if len(analyzer.holdings) > 0:
-                    import plotly.express as px
                     
                     fig = px.pie(
                         analyzer.holdings, 
@@ -504,11 +510,14 @@ def main():
                     # Step 8: Calculate daily portfolio value
                     portfolio_df = analyzer.calculate_portfolio_value(historical_prices)
                     
+                    # Store in session state for later use
+                    st.session_state.portfolio_df = portfolio_df
+                    st.session_state.historical_prices = historical_prices
+                    
                     if not portfolio_df.empty:
                         st.success("✅ Step 8: Daily portfolio value calculated")
                         
                         # Portfolio value chart
-                        import plotly.graph_objects as go
                         
                         fig = go.Figure()
                         
@@ -577,6 +586,9 @@ def main():
                 # Step 9: Calculate XIRR
                 xirr_results = analyzer.calculate_xirr()
                 
+                # Store in session state for later use
+                st.session_state.xirr_results = xirr_results
+                
                 if xirr_results:
                     st.success("✅ Step 9: XIRR calculations completed")
                     
@@ -606,7 +618,6 @@ def main():
                         st.dataframe(styled_df, use_container_width=True)
                         
                         # XIRR visualization
-                        import plotly.express as px
                         
                         fig = px.bar(
                             xirr_df, 
@@ -670,9 +681,9 @@ def main():
                 "Prices and quantities adjusted",
                 f"{len(analyzer.currency_rates)} currencies",
                 "USD, INR, SGD conversions",
-                f"{len(historical_prices) if 'historical_prices' in locals() else 0} stocks",
+                f"{len(getattr(st.session_state, 'historical_prices', {})) } stocks",
                 "Daily portfolio values calculated",
-                f"{len(xirr_results) if 'xirr_results' in locals() else 0} XIRR calculations",
+                f"{len(getattr(st.session_state, 'xirr_results', {})) } XIRR calculations",
                 "Interactive dashboard created"
             ]
         }
@@ -689,7 +700,7 @@ def main():
             if st.button("📊 Export Portfolio Summary"):
                 summary_export = {
                     'holdings': analyzer.holdings.to_dict('records'),
-                    'xirr_results': xirr_results if 'xirr_results' in locals() else {},
+                    'xirr_results': getattr(st.session_state, 'xirr_results', {}),
                     'currency_rates': analyzer.currency_rates,
                     'total_transactions': len(analyzer.all_trades)
                 }
@@ -704,7 +715,8 @@ def main():
         with col2:
             if st.button("📈 Export Full Analysis"):
                 # Create comprehensive export
-                if 'portfolio_df' in locals() and not portfolio_df.empty:
+                portfolio_df = getattr(st.session_state, 'portfolio_df', pd.DataFrame())
+                if not portfolio_df.empty:
                     export_data = portfolio_df.to_csv(index=False)
                     st.download_button(
                         label="💾 Download Portfolio Data CSV",
@@ -712,6 +724,8 @@ def main():
                         file_name="portfolio_analysis.csv",
                         mime="text/csv"
                     )
+                else:
+                    st.warning("No portfolio data available for export. Please complete the analysis first.")
     
     else:
         # Welcome screen
