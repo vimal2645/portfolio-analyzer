@@ -7,3 +7,6 @@ xirr
 forex-python
 requests
 simplejson
+pycountry
+streamlit-aggrid
+streamlit-option-menu   
