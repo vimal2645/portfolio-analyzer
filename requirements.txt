@@ -9,4 +9,4 @@ requests
 simplejson
 pycountry
 streamlit-aggrid
-streamlit-option-menu   
+streamlit-option-menu
